@@ -4,8 +4,8 @@ import matplotlib as matplot
 
 # Paramètres de la simulation
 NB_TRUCKS = 5                   # Nombre de camions
-NB_VERTICES = 100               # Nombre de villes
-PROBABILITY_EDGE = 0.1          # Probabilité qu'il y ait une arête entre deux sommets
+NB_VERTICES = 15               # Nombre de villes
+PROBABILITY_EDGE = 0.4          # Probabilité qu'il y ait une arête entre deux sommets
 MIN_WEIGHT = 10                 # Poids minimal d'une arête
 MAX_WEIGHT = 500                # Poids maximal d'une arête
 
@@ -14,7 +14,7 @@ def create_graph(nb_vertices):
     graph = igraph.Graph.Erdos_Renyi(nb_vertices, PROBABILITY_EDGE, directed=False)
 
     graph["title"] = "Graphe de villes"
-    graph.vs["name"] = ["Ville " + str(i) for i in range(nb_vertices)]
+    graph.vs["name"] = ["Ville " + str(i + 1) for i in range(nb_vertices)]
 
     # La fonction simplify() permet de supprimer les arêtes en double et donc d'alléger la structure du graphe et la recherche de chemins
     graph.simplify()
