@@ -1,23 +1,46 @@
 import numpy as np
 import igraph
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 import pulp
-import time
+import math
+from gurobipy import *
 
-# Parameters for the simulation
-NB_VERTICES = 10             # Number of cities
-PROBABILITY_EDGE = 0.5         # Probability of an edge between two vertices
-MIN_WEIGHT = 10                # Minimum weight of an edge
-MAX_WEIGHT = 500               # Maximum weight of an edge
-INF = 1e6                      # Infinite value to represent impossible connections
+# ------------------------------------------------- #
+# Paramètres de la simulation
+# ------------------------------------------------- #
+# Limite de temps pour la résolution du problème (en secondes)
+TIME_LIMIT = 300
+# Nombre de camions
+NB_TRUCKS = 3
+# Nombre de villes
+NB_VERTICES = 20
+# Ville de départ (doit être < NB_VERTICES)
+START_CITY = round(NB_VERTICES / 2)
+# Probabilité d'avoir une arête entre deux sommets (chemin entre deux villes)
+PROBABILITY_EDGE = 0.4
+# Poids (distance) minimum d'une arête
+MIN_WEIGHT = 10
+# Poids (distance) maximum d'une arête
+MAX_WEIGHT = 500
+# Valeur infinie pour représenter une connexion impossible
+INF = 1e100
+# Couleurs pour les arêtes parcourues par les camions
+COLORS = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "brown", "black", "gray"]
 
-# Create a random graph with nb_vertices vertices
+# Créer un graphe aléatoire avec NB_VERTICES sommets
 def create_graph(nb_vertices):
     graph = igraph.Graph.Erdos_Renyi(nb_vertices, PROBABILITY_EDGE, directed=False)
-    graph["title"] = "City Graph"
-    graph.vs["name"] = ["City " + str(i) for i in range(nb_vertices)]
+
+    graph["title"] = "Graphe des villes"
+    graph.vs["name"] = ["Ville " + str(i) for i in range(nb_vertices)]
+
+    # La fonction simplify() supprime les arêtes en double
+    # Permet d'alléger le graphe et la recherche de solutions
     graph.simplify()
+
     set_random_weights(graph)
+
     return graph
 
 # Définir des poids aléatoires pour les arêtes du graphe
@@ -36,118 +59,137 @@ def set_random_weights(graph):
         edge["label"] = edge["weight"]
 
 def get_adjacency_matrix(graph):
-    adjacency_matrix = np.full((graph.vcount(), graph.vcount()), INF)
+    matrice = np.full((graph.vcount(), graph.vcount()), INF)
+
     for edge in graph.es:
         u, v = edge.source, edge.target
         weight = edge['weight']
-        adjacency_matrix[u, v] = weight
-        adjacency_matrix[v, u] = weight  # Because the graph is undirected
-    np.fill_diagonal(adjacency_matrix, 0)
-    return adjacency_matrix
+        matrice[u, v] = weight
+        matrice[v, u] = weight  # Car le graphe est non orienté
 
-def set_random_weights(graph):
-    for edge in graph.es:
-        edge["weight"] = np.random.randint(MIN_WEIGHT, MAX_WEIGHT)
-        edge["label"] = edge["weight"]
+    np.fill_diagonal(matrice, 0)
 
-def solve_tsp_with_pulp(adjacency_matrix, result):
+    return matrice
 
-    # Create the problem
-    prob = pulp.LpProblem("Traveling_Salesman", pulp.LpMinimize)
-    nb_vertices = adjacency_matrix.shape[0]
-    cities = list(range(nb_vertices))
+def solve(matrix):
+    # Créer le problème PuLP
+    prob = pulp.LpProblem("VRP", pulp.LpMinimize)
 
-    # Decision variables
-    x = pulp.LpVariable.dicts("x", (cities, cities), 0, 1, pulp.LpBinary)
-    u = pulp.LpVariable.dicts("u", cities, 0, nb_vertices, pulp.LpContinuous)
+    # ------------------------------------------------- #
+    # Variables de décision
+    # ------------------------------------------------- #
+    # Indique si l'arête (i, j) est empruntée par le camion k
+    c = pulp.LpVariable.dicts("c", [(i, j, k) for i in range(NB_VERTICES) for j in range(NB_VERTICES) for k in range(NB_TRUCKS)], lowBound=0, upBound=1, cat=pulp.LpBinary)
+    # Indique la position du camion k
+    u = pulp.LpVariable.dicts("u", (i for i in range(1, NB_VERTICES)), lowBound=1, upBound=NB_VERTICES-1, cat=pulp.LpInteger)
 
-    # Objective function
-    prob += pulp.lpSum(adjacency_matrix[i][j] * x[i][j] for i in cities for j in cities), "Total_Cost"
+    # Fonction objectif
+    prob += pulp.lpSum(matrix[i][j] * c[(i, j, k)] for i in range(NB_VERTICES) for j in range(NB_VERTICES) for k in range(NB_TRUCKS))
 
-    # Constraints: each city must be visited exactly once
-    for i in cities:
-        prob += pulp.lpSum(x[i][j] for j in cities if j != i) == 1, f"Out_{i}"
-    for j in cities:
-        prob += pulp.lpSum(x[i][j] for i in cities if i != j) == 1, f"In_{j}"
+    # ------------------------------------------------- #
+    # Contraintes
+    # ------------------------------------------------- #
+    # Chaque ville doit être visitée au moins une fois
+    for i in range(NB_VERTICES):
+        prob += pulp.lpSum(c[(i, j, k)] for j in range(NB_VERTICES) for k in range(NB_TRUCKS)) >= 1
 
-    # Subtour elimination constraints (Miller-Tucker-Zemlin)
-    for i in cities[1:]:
-        for j in cities[1:]:
+    # L'ensemble des chemins parcourus forment un cycle
+    for k in range(NB_TRUCKS):
+        for i in range(1, NB_VERTICES):
+            prob += pulp.lpSum(c[(i, j, k)] for j in range(NB_VERTICES)) - pulp.lpSum(c[(j, i, k)] for j in range(NB_VERTICES)) == 0
+
+    # Tous les camions doivent partir de la ville START_CITY
+    for k in range(NB_TRUCKS):
+        prob += pulp.lpSum(c[START_CITY, j, k] for j in [x for x in range(NB_VERTICES) if x != START_CITY]) == 1
+
+    # Tous les camions doivent revenir à la ville START_CITY
+    for k in range(NB_TRUCKS):
+        prob += pulp.lpSum(c[i, START_CITY, k] for i in [x for x in range(NB_VERTICES) if x != START_CITY]) == 1
+
+    # Ne pas boucler sur la même ville
+    for k in range(NB_TRUCKS):
+        prob += pulp.lpSum(c[(i, i, k)] for i in range(NB_VERTICES)) == 0
+
+    for i in range(1, NB_VERTICES):
+        for j in range(1, NB_VERTICES):
             if i != j:
-                prob += u[i] - u[j] + nb_vertices * x[i][j] <= nb_vertices - 1
+                for k in range(NB_TRUCKS):
+                    prob += u[i] - u[j] + (NB_VERTICES - 1) * c[(i, j, k)] <= NB_VERTICES - 2
 
-    # Constraints to ensure return to the starting city
-    prob += pulp.lpSum(x[0][j] for j in cities if j != 0) == 1, "Out_Start"
-    prob += pulp.lpSum(x[i][0] for i in cities if i != 0) == 1, "In_Start"
+    # La répartition entre les camions doit être équitable
+    # for i in range(1, NB_VERTICES):
+    #     prob += pulp.lpSum(c[(i, j, k)] for j in range(NB_VERTICES) for k in range(NB_TRUCKS)) == 1
 
-    # Solver initialization with a time limit
-    solver = pulp.PULP_CBC_CMD(timeLimit=60)
+    # Paramètres du solveur pour limiter le temps de résolution (en secondes)
+    # solver = pulp.PULP_CBC_CMD(timeLimit=TIME_LIMIT)
+    # solver = pulp.getSolver("GUROBI_CMD", timeLimit=TIME_LIMIT)
 
-    prob.solve(solver)  # Solve the problem
-    print(f"Status after solving: {pulp.LpStatus[prob.status]}")
+    prob.solve(pulp.GUROBI(Cuts=0, Presolve=0, Heuristics=0, OutputFlag=1, msg=1, TimeLimit=TIME_LIMIT))
 
-    # Check the status of the solution
-    if pulp.LpStatus[prob.status] == 'Optimal':
-        result.append("Status: Optimal")
-    else:
-        result.append("Status: Non-optimal")
+    # Afficher les résultats
+    print("Status:", pulp.LpStatus[prob.status])
+    print("Objective:", pulp.value(prob.objective))
 
-    # Extract the solution
-    solution = [(i, j) for i in cities for j in cities if x[i][j].varValue == 1]
+    for v in sorted(prob.variables(), key=lambda v: v.toDict()["name"].split("_")[-1][0:-1]):
+        if v.varValue > 0 and v.name.startswith("c"):
+            print(v.name, "=", v.varValue, v)
 
-    # Construct the complete cycle starting from city 0
-    cycle = [0]
-    total_cost = 0
-    while len(cycle) < nb_vertices + 1:
-        for (i, j) in solution:
-            if i == cycle[-1] and j not in cycle:
-                cycle.append(j)
-                total_cost += adjacency_matrix[i][j]
-                break
-        if len(cycle) == nb_vertices:  # Append the start city to complete the cycle
-            cycle.append(0)
-            total_cost += adjacency_matrix[cycle[-2]][0]  # Add cost of returning to the start
-
-    # Display the complete cycle and the total cost
-    result.append(f"\nComplete cycle with a total cost of {total_cost}:")
-    for i in range(len(cycle) - 1):
-        result.append(f"From city {cycle[i]} to city {cycle[i+1]} with a cost of {adjacency_matrix[cycle[i]][cycle[i+1]]}")
+    return [(i, j, k) for i in range(NB_VERTICES) for j in range(NB_VERTICES) for k in range(NB_TRUCKS) if c[(i, j, k)].varValue > 0]
 
 def main():
-    graph = create_graph(nb_vertices=NB_VERTICES)
-    adjacency_matrix = get_adjacency_matrix(graph)
-    print("Adjacency Matrix:")
-    print(adjacency_matrix)
+    graphe = create_graph(nb_vertices=NB_VERTICES)
+    matrice = get_adjacency_matrix(graph=graphe)
 
-    # Verify the weights of the edges
-    for i in range(len(adjacency_matrix)):
-        for j in range(len(adjacency_matrix[i])):
-            if adjacency_matrix[i][j] < INF:
-                print(f"Weight of the edge between {i} and {j}: {adjacency_matrix[i][j]}")
+    # print(matrice)
 
-    # Container for the result
-    result = []
+    solution = solve(matrice)
 
-    # Solve the Traveling Salesman Problem with a time limit
-    solve_tsp_with_pulp(adjacency_matrix, result)
+    print(solution)
+    # solution = None
 
-    # Display the result
-    for line in result:
-        print(line)
+    # Colorier les arêtes parcourues par les camions
+    BASE_COLOR = "#ececec"
 
-    # Display the graph
+    for edge in graphe.es:
+        try:
+            sol = list(filter(lambda s: (s[0] == edge.source) and (s[1] == edge.target) or (s[1] == edge.source) and (s[0] == edge.target), solution))[0]
+
+            if sol is not None:
+                edge["color"] = COLORS[sol[2]]
+                continue
+        except:
+            pass
+
+        edge["color"] = BASE_COLOR
+
+    # Somme cumulée des distances parcourues pour chaque camion
+    total_distance = [0] * NB_TRUCKS
+    
+    for edge in graphe.es:
+        for i in range(NB_TRUCKS):
+            if edge["color"] == COLORS[i]:
+                total_distance[i] += edge["weight"]
+
+    # Afficher le graphe
     figures, axes = plt.subplots()
     igraph.plot(
         graphe,
         target=axes,
-        layout=graph.layout("kk"),
-        vertex_size=30,
-        vertex_label=graph.vs["name"],
-        vertex_label_size=5,
-        vertex_color=["red" if v.degree() > 0 else "black" for v in graph.vs],
-        edge_width=1,
-        edge_color="#e8e8e8",
+        layout=graphe.layout("kk"),
+        vertex_size=50,
+        vertex_label=graphe.vs["name"],
+        vertex_label_size=10,
+        vertex_color=["yellow" if v.attributes()["name"] == f"Ville {START_CITY}" else "red" if v.degree() > 0 else "black" for v in graphe.vs], # Les villes n'ayant aucun lien avec d'autre villes sont en noir
+        edge_width=3,
+        edge_color=graphe.es["color"],
+        edge_label=[e["weight"] if e.attributes()["color"] != BASE_COLOR else "" for e in graphe.es]
     )
+
+    custom_legend = [
+        mlines.Line2D([0], [0], color=COLORS[i], lw=4, label=f"Camion {i} - {total_distance[i]}") for i in range(NB_TRUCKS)
+    ]
+
+    axes.legend(custom_legend, [line.get_label() for line in custom_legend], loc="upper right")
 
     plt.show()
 
